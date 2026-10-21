@@ -7,6 +7,175 @@ import numpy as np
 import chess # python-chess
 
 
+### action encoding
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+DIRECTIONS = [
+    (0, 1),    # N
+    (1, 1),    # NE
+    (1, 0),    # E
+    (1, -1),   # SE
+    (0, -1),   # S
+    (-1, -1),  # SW
+    (-1, 0),   # W
+    (-1, 1),   # NW
+]
+
+KNIGHT_MOVES = [
+    (1, 2), (2, 1), (2, -1), (1, -2),
+    (-1, -2), (-2, -1), (-2, 1), (-1, 2),
+]
+
+UNDERPROMOTIONS = [
+    chess.KNIGHT, chess.BISHOP, chess.ROOK
+]
+
+
+def uci_to_vec4672(uci: str) -> np.ndarray:
+    move = chess.Move.from_uci(uci)
+
+    f0 = chess.square_file(move.from_square)
+    r0 = chess.square_rank(move.from_square)
+    f1 = chess.square_file(move.to_square)
+    r1 = chess.square_rank(move.to_square)
+
+    df, dr = f1 - f0, r1 - r0
+
+    if move.promotion in UNDERPROMOTIONS:
+        # -1, 0, +1 files relative to origin
+        if abs(df) > 1 or abs(dr) != 1:
+            raise ValueError("Invalid underpromotion geometry")
+
+        direction_idx = df + 1
+        piece_idx = UNDERPROMOTIONS.index(move.promotion)
+        channel = 64 + direction_idx * 3 + piece_idx
+
+    elif (df, dr) in KNIGHT_MOVES:
+        channel = 56 + KNIGHT_MOVES.index((df, dr))
+
+    else:
+        distance = max(abs(df), abs(dr))
+
+        if distance == 0 or not (
+            df == 0 or dr == 0 or abs(df) == abs(dr)
+        ):
+            raise ValueError("Invalid move geometry")
+
+        direction = (
+            int(np.sign(df)),
+            int(np.sign(dr))
+        )
+
+        direction_idx = DIRECTIONS.index(direction)
+        channel = direction_idx * 7 + distance - 1
+
+    vec = np.zeros((8, 8, 73), dtype=np.float32)
+    vec[r0, f0, channel] = 1.0
+
+    return vec
+
+
+def vec4672_to_uci(vec: np.ndarray, board: chess.Board) -> str:
+    """
+    Decode a policy tensor, selecting the highest-scoring
+    legal move. Accepts one-hot vectors, logits or probabilities.
+    """
+    scores = np.asarray(vec).reshape(8, 8, 73)
+
+    legal_moves = list(board.legal_moves)
+
+    if not legal_moves:
+        raise ValueError("No legal moves available")
+
+    best_move = max(
+        legal_moves,
+        key=lambda move: scores[
+            chess.square_rank(move.from_square),
+            chess.square_file(move.from_square),
+            np.argmax(uci_to_vec4672(move.uci())) % 73
+        ]
+    )
+
+    return best_move.uci()
+
+
+
+
+
+
+
+
+
+
+
+
+
+def uci_to_vec4096(uci: str) -> np.ndarray:
+    move = chess.Move.from_uci(uci)
+
+    idx = move.from_square * 64 + move.to_square
+
+    vec = np.zeros(ACTION_SIZE, dtype=np.float32)
+    vec[idx] = 1.0
+    return vec
+
+
+def vec4096_to_uci(vec: np.ndarray, board: chess.Board) -> str:
+    idx = int(np.argmax(vec))
+
+    from_sq, to_sq = divmod(idx, 64)
+
+    move = chess.Move(from_sq, to_sq)
+
+    # Automatically promote to queen when appropriate
+    piece = board.piece_at(from_sq)
+
+    if (
+        piece is not None
+        and piece.piece_type == chess.PAWN
+        and chess.square_rank(to_sq) in (0, 7)
+    ):
+        move.promotion = chess.QUEEN
+
+    return move.uci()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### state encoding
+
+
 # type: (chess.Board) -> np.ndarray
 def board_to_vec837(board):
 	
@@ -39,6 +208,11 @@ def board_to_vec837(board):
 	return vec837
 
 
+
+
+### pipeline
+
+
 # type: (str) -> tuple[np.ndarray, list[str]]
 def pgn_to_supervised(pgn_path, max_games=None):
 	states = []
@@ -47,7 +221,7 @@ def pgn_to_supervised(pgn_path, max_games=None):
 	
 	# stream up to #max_games games from lichess PGN file
 	with open(pgn_path, "r", encoding="utf-8") as pgn:
-		while True
+		while True:
 			
 			# init game if available
 			game = chess.pgn.read_game(pgn)
@@ -95,7 +269,8 @@ def batch_generator_mono(data_x, batch_size, shuffle_key=None):
 
 
 
-###! no documentation of testing
+
+###! no testing docs
 
 # # type: (list, (list)->list, int) -> list
 # import multiprocessing
@@ -118,7 +293,7 @@ def batch_generator_mono(data_x, batch_size, shuffle_key=None):
 
 
 
-###! does not generalise, 4d specific
+###! does not generalise
 
 # processing
 #from sklearn.preprocessing import MinMaxScaler
