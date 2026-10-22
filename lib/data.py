@@ -7,174 +7,9 @@ import numpy as np
 import chess # python-chess
 
 
-### action encoding
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-DIRECTIONS = [
-    (0, 1),    # N
-    (1, 1),    # NE
-    (1, 0),    # E
-    (1, -1),   # SE
-    (0, -1),   # S
-    (-1, -1),  # SW
-    (-1, 0),   # W
-    (-1, 1),   # NW
-]
-
-KNIGHT_MOVES = [
-    (1, 2), (2, 1), (2, -1), (1, -2),
-    (-1, -2), (-2, -1), (-2, 1), (-1, 2),
-]
-
-UNDERPROMOTIONS = [
-    chess.KNIGHT, chess.BISHOP, chess.ROOK
-]
-
-
-def uci_to_vec4672(uci: str) -> np.ndarray:
-    move = chess.Move.from_uci(uci)
-
-    f0 = chess.square_file(move.from_square)
-    r0 = chess.square_rank(move.from_square)
-    f1 = chess.square_file(move.to_square)
-    r1 = chess.square_rank(move.to_square)
-
-    df, dr = f1 - f0, r1 - r0
-
-    if move.promotion in UNDERPROMOTIONS:
-        # -1, 0, +1 files relative to origin
-        if abs(df) > 1 or abs(dr) != 1:
-            raise ValueError("Invalid underpromotion geometry")
-
-        direction_idx = df + 1
-        piece_idx = UNDERPROMOTIONS.index(move.promotion)
-        channel = 64 + direction_idx * 3 + piece_idx
-
-    elif (df, dr) in KNIGHT_MOVES:
-        channel = 56 + KNIGHT_MOVES.index((df, dr))
-
-    else:
-        distance = max(abs(df), abs(dr))
-
-        if distance == 0 or not (
-            df == 0 or dr == 0 or abs(df) == abs(dr)
-        ):
-            raise ValueError("Invalid move geometry")
-
-        direction = (
-            int(np.sign(df)),
-            int(np.sign(dr))
-        )
-
-        direction_idx = DIRECTIONS.index(direction)
-        channel = direction_idx * 7 + distance - 1
-
-    vec = np.zeros((8, 8, 73), dtype=np.float32)
-    vec[r0, f0, channel] = 1.0
-
-    return vec
-
-
-def vec4672_to_uci(vec: np.ndarray, board: chess.Board) -> str:
-    """
-    Decode a policy tensor, selecting the highest-scoring
-    legal move. Accepts one-hot vectors, logits or probabilities.
-    """
-    scores = np.asarray(vec).reshape(8, 8, 73)
-
-    legal_moves = list(board.legal_moves)
-
-    if not legal_moves:
-        raise ValueError("No legal moves available")
-
-    best_move = max(
-        legal_moves,
-        key=lambda move: scores[
-            chess.square_rank(move.from_square),
-            chess.square_file(move.from_square),
-            np.argmax(uci_to_vec4672(move.uci())) % 73
-        ]
-    )
-
-    return best_move.uci()
-
-
-
-
-
-
-
-
-
-
-
-
-
-def uci_to_vec4096(uci: str) -> np.ndarray:
-    move = chess.Move.from_uci(uci)
-
-    idx = move.from_square * 64 + move.to_square
-
-    vec = np.zeros(ACTION_SIZE, dtype=np.float32)
-    vec[idx] = 1.0
-    return vec
-
-
-def vec4096_to_uci(vec: np.ndarray, board: chess.Board) -> str:
-    idx = int(np.argmax(vec))
-
-    from_sq, to_sq = divmod(idx, 64)
-
-    move = chess.Move(from_sq, to_sq)
-
-    # Automatically promote to queen when appropriate
-    piece = board.piece_at(from_sq)
-
-    if (
-        piece is not None
-        and piece.piece_type == chess.PAWN
-        and chess.square_rank(to_sq) in (0, 7)
-    ):
-        move.promotion = chess.QUEEN
-
-    return move.uci()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-### state encoding
-
+### state encoding (positions OHE + special states, concatenated)
 
 # type: (chess.Board) -> np.ndarray
 def board_to_vec837(board):
@@ -187,9 +22,9 @@ def board_to_vec837(board):
 	
 	# set position state OHE vectors: (class) 0-5:white, 6-11:black
 	for pos_idx, piece in board.piece_map().items():
-		cat_idx = piece.piece_type - 1
+		class_idx = piece.piece_type - 1 # [pawn, knight, bishop, rook, queen, king]
 		if not piece.color:
-			cat_idx += 6
+			class_idx += 6
 		vec837[pos_idx * 12 + cat_idx] = 1.0
 	
 	# set turn state: (value) 0:black, 1:white
@@ -210,11 +45,439 @@ def board_to_vec837(board):
 
 
 
+### action encoding (AlphaZero encoding)
+
+# define inter/+cardinal directions, (8*7) 0-55
+E4672_DIR = [
+	(0, 1),   # N
+	(1, 1),   # NE
+	(1, 0),   # E
+	(1, -1),  # SE
+	(0, -1),  # S
+	(-1, -1), # SW
+	(-1, 0),  # W
+	(-1, 1),  # NW
+]
+
+# define knight translations, (8) 56-63
+E4672_KNIGHT = [
+	(1, 2),   # up right
+	(2, 1),   # right up
+	(2, -1),  # right down
+	(1, -2),  # down right
+	(-1, -2), # down left
+	(-2, -1), # 
+	(-2, 1),
+	(-1, 2),
+]
+
+# define underpromotions, directional: (3*3) 64-72
+E4672_UNDER_PROM = ['n', 'b', 'r'] # [knight, bishop, rook]
+
+
+# type: (str) -> np.ndarray
+def uci_to_vec4672(uci):
+	
+	# determine to/from file/rank (col/row) indices
+	f0 = ord(uci[0]) - 97
+	r0 = int(uci[1]) - 1
+	f1 = ord(uci[2]) - 97
+	r1 = int(uci[3]) - 1
+	df = f1 - f0
+	dr = r1 - r0
+	
+	# handle promotion move offset
+	if len(uci) == 5 and uci[4] in E4672_UNDER_PROM:
+		df_signed = df if dr > 0 else -df # if black pawn flip file sign
+		class_offset = 64 + (df_signed + 1) * 3 + E4672_UNDER_PROM.index(uci[4])
+	
+	# handle knight move offset
+	elif (df, dr) in E4672_KNIGHT:
+		class_offset = 56 + E4672_KNIGHT.index((df, dr))
+	
+	# handle standard move offset
+	else:
+		distance = max(abs(df), abs(dr))
+		direction = (np.sign(df), np.sign(dr))
+		class_offset = DIRECTIONS.index(direction) * 7 + distance - 1
+	
+	# construct OHE vector
+	idx4672 = (r0 * 8 + f0) * 73 + class_offset
+	vec4672 = np.zeros(4672, dtype=np.float32)
+	vec4672[idx4672] = 1.0
+	
+	return vec
+
+
+# type: (np.ndarray, int) -> str
+def vec4672_to_uci(vec, piece_class):
+	
+	# get argmax
+	vec_argmax = int(np.argmax(vec))
+	
+	# derive from-rank/from-file/action
+	sq, action = divmod(idx, 73)
+	r0, f0 = divmod(sq, 8)
+	
+	# initialise promotion character
+	promotion_chr = ''
+	
+	# decode regular inter/+cardinal translation
+	if action < 56:
+		dir_idx, distance = divmod(action, 7)
+		df, dr = E4672_DIR[dir_idx]
+		df = distance + 1
+		dr = distance + 1
+	
+	# decode knight translation
+	elif channel < 64:
+		dir_idx = action - 56
+		df, dr = E4672_KNIGHT[dir_idx]
+	
+	# decode under-promotion translation and character
+	else:
+		dir_class, piece_idx = divmod(channel - 64, 3)
+		dr = 1 if r0 == 6 else -1 # up if white, down if black
+		df = (dir_class - 1) * dr # right if white, left if black
+		promotion_chr = E4672_UNDER_PROM[piece_idx]
+	
+	# derive to-rank/to-file
+	r1 = r0 + dr
+	f1 = f0 + df
+	
+	# handle bound legality
+	if not (0 <= f1 < 8 and 0 <= r1 < 8):
+		raise ValueError("Action points outside the board") 
+	
+	# handle implicit promotion
+	if piece_type == 1 and r1 in (0, 7) and promotion_chr == '':
+		promotion_chr = "q"
+	
+	# construct UCI string and return
+	return f"{chr(97 + f0)}{r0 + 1}{chr(97 + f1)}{r1 + 1}{promotion}"
+
+
+###! E4672 with python-chess dependency
+
+# DIRECTIONS = [
+    # (0, 1), (1, 1), (1, 0), (1, -1),
+    # (0, -1), (-1, -1), (-1, 0), (-1, 1),
+# ]
+
+# KNIGHT_OFFSETS = [
+    # (1, 2), (2, 1), (2, -1), (1, -2),
+    # (-1, -2), (-2, -1), (-2, 1), (-1, 2),
+# ]
+
+# UNDERPROMOTION_PIECES = {
+    # chess.KNIGHT: 0,
+    # chess.BISHOP: 1,
+    # chess.ROOK: 2,
+# }
+
+
+# def uci_to_vec4672(uci: str) -> np.ndarray:
+    # """Encode a UCI move as a 4,672-element one-hot vector."""
+    # move = chess.Move.from_uci(uci)
+
+    # from_file = chess.square_file(move.from_square)
+    # from_rank = chess.square_rank(move.from_square)
+    # to_file = chess.square_file(move.to_square)
+    # to_rank = chess.square_rank(move.to_square)
+
+    # df = to_file - from_file
+    # dr = to_rank - from_rank
+
+    # if move.promotion in UNDERPROMOTION_PIECES:
+        # # Infer forward direction from the promotion move's rank change.
+        # # Relative left/right is from the moving player's perspective.
+        # relative_df = df if dr > 0 else -df
+        # direction_idx = {-1: 0, 0: 1, 1: 2}[relative_df]
+        # plane = 64 + direction_idx * 3 + UNDERPROMOTION_PIECES[move.promotion]
+
+    # elif (df, dr) in KNIGHT_OFFSETS:
+        # plane = 56 + KNIGHT_OFFSETS.index((df, dr))
+
+    # else:
+        # distance = max(abs(df), abs(dr))
+        # direction = (df // distance, dr // distance)
+        # direction_idx = DIRECTIONS.index(direction)
+        # plane = direction_idx * 7 + distance - 1
+
+    # index = move.from_square * 73 + plane
+    # vec = np.zeros(64 * 73, dtype=np.float32)
+    # vec[index] = 1.0
+    # return vec
+
+
+# def vec4672_to_uci(vec: np.ndarray, board: chess.Board) -> str:
+    # """Decode a 4,672-element policy vector, checking legality on the board."""
+    # if vec.size != 64 * 73:
+        # raise ValueError("vec must contain 4672 values")
+
+    # index = int(np.argmax(vec))
+    # from_square, plane = divmod(index, 73)
+
+    # from_file = chess.square_file(from_square)
+    # from_rank = chess.square_rank(from_square)
+    # promotion = None
+
+    # if plane < 56:
+        # direction_idx, distance_idx = divmod(plane, 7)
+        # df, dr = DIRECTIONS[direction_idx]
+        # distance = distance_idx + 1
+        # to_file = from_file + df * distance
+        # to_rank = from_rank + dr * distance
+
+    # elif plane < 64:
+        # df, dr = KNIGHT_OFFSETS[plane - 56]
+        # to_file = from_file + df
+        # to_rank = from_rank + dr
+
+    # else:
+        # direction_idx, piece_idx = divmod(plane - 64, 3)
+        # relative_df = (-1, 0, 1)[direction_idx]
+        # df = relative_df if board.turn == chess.WHITE else -relative_df
+        # dr = 1 if board.turn == chess.WHITE else -1
+        # to_file = from_file + df
+        # to_rank = from_rank + dr
+        # promotion = (chess.KNIGHT, chess.BISHOP, chess.ROOK)[piece_idx]
+
+    # if not (0 <= to_file < 8 and 0 <= to_rank < 8):
+        # raise ValueError("Vector selects a move off the board")
+
+    # to_square = chess.square(to_file, to_rank)
+
+    # # Queen promotions use the ordinary direction/distance planes.
+    # piece = board.piece_at(from_square)
+    # if (
+        # promotion is None
+        # and piece is not None
+        # and piece.piece_type == chess.PAWN
+        # and to_rank in (0, 7)
+    # ):
+        # promotion = chess.QUEEN
+
+    # move = chess.Move(from_square, to_square, promotion=promotion)
+    # if not board.is_legal(move):
+        # raise ValueError(f"Vector selects an illegal move: {move.uci()}")
+
+    # return move.uci()
+
+
+###! naive complete categorical with promotions
+
+# PROMO_TO_CLASS = {
+	# "": 0,   # no promotion
+	# "q": 1,
+	# "r": 2,
+	# "b": 3,
+	# "n": 4,
+# }
+
+# def uci_to_idx20480(uci: str) -> int:
+	# from_file = ord(uci[0]) - ord("a")
+	# from_rank = ord(uci[1]) - ord("1")
+	# to_file = ord(uci[2]) - ord("a")
+	# to_rank = ord(uci[3]) - ord("1")
+	
+	# from_square = from_rank * 8 + from_file
+	# to_square = to_rank * 8 + to_file
+	# promo_class = PROMO_TO_CLASS[uci[4:].lower()]
+	
+	# return (from_square * 64 + to_square) * 5 + promo_class
+
+
+# CLASS_TO_PROMO = ["", "q", "r", "b", "n"]
+
+# def idx20480_to_uci(index: int) -> str:
+    # if not 0 <= index < 64 * 64 * 5:
+        # raise ValueError("index must be in the range [0, 20480)")
+
+    # pair_index, promo_class = divmod(index, 5)
+    # from_square, to_square = divmod(pair_index, 64)
+
+    # from_file, from_rank = from_square % 8, from_square // 8
+    # to_file, to_rank = to_square % 8, to_square // 8
+
+    # return (
+        # chr(ord("a") + from_file)
+        # + chr(ord("1") + from_rank)
+        # + chr(ord("a") + to_file)
+        # + chr(ord("1") + to_rank)
+        # + CLASS_TO_PROMO[promo_class]
+    # )
+
+
+###! naive complete categorical with promotions and python-chess dependency
+
+# ACTION_SIZE = 64 * 64 * 5
+
+# PROMOTION_TO_CLASS = {
+	# None: 0,
+	# chess.QUEEN: 1,
+	# chess.ROOK: 2,
+	# chess.BISHOP: 3,
+	# chess.KNIGHT: 4,
+# }
+# CLASS_TO_PROMOTION = {v: k for k, v in PROMOTION_TO_CLASS.items()}
+
+
+# def uci_to_vec20480(uci: str) -> np.ndarray:
+	# move = chess.Move.from_uci(uci)
+
+	# pair_idx = move.from_square * 64 + move.to_square
+	# promotion_class = PROMOTION_TO_CLASS[move.promotion]
+	# idx = pair_idx * 5 + promotion_class
+
+	# vec = np.zeros(ACTION_SIZE, dtype=np.float32)
+	# vec[idx] = 1.0
+	# return vec
+
+
+# def vec20480_to_uci(vec: np.ndarray, board: chess.Board) -> str:
+	# idx = int(np.argmax(vec))
+	# pair_idx, promotion_class = divmod(idx, 5)
+	# from_sq, to_sq = divmod(pair_idx, 64)
+
+	# promotion = CLASS_TO_PROMOTION[promotion_class]
+	# move = chess.Move(from_sq, to_sq, promotion=promotion)
+
+	# return move.uci()
+
+
+###! E4672 3D with python chess dependency
+
+# DIRECTIONS = [
+	# (0, 1),    # N
+	# (1, 1),    # NE
+	# (1, 0),    # E
+	# (1, -1),   # SE
+	# (0, -1),   # S
+	# (-1, -1),  # SW
+	# (-1, 0),   # W
+	# (-1, 1),   # NW
+# ]
+
+# KNIGHT_MOVES = [
+	# (1, 2), (2, 1), (2, -1), (1, -2),
+	# (-1, -2), (-2, -1), (-2, 1), (-1, 2),
+# ]
+
+# UNDERPROMOTIONS = [
+	# chess.KNIGHT, chess.BISHOP, chess.ROOK
+# ]
+
+
+# def uci_to_vec4672(uci: str) -> np.ndarray:
+	# move = chess.Move.from_uci(uci)
+
+	# f0 = chess.square_file(move.from_square)
+	# r0 = chess.square_rank(move.from_square)
+	# f1 = chess.square_file(move.to_square)
+	# r1 = chess.square_rank(move.to_square)
+
+	# df, dr = f1 - f0, r1 - r0
+
+	# if move.promotion in UNDERPROMOTIONS:
+		# # -1, 0, +1 files relative to origin
+		# if abs(df) > 1 or abs(dr) != 1:
+			# raise ValueError("Invalid underpromotion geometry")
+
+		# direction_idx = df + 1
+		# piece_idx = UNDERPROMOTIONS.index(move.promotion)
+		# channel = 64 + direction_idx * 3 + piece_idx
+
+	# elif (df, dr) in KNIGHT_MOVES:
+		# channel = 56 + KNIGHT_MOVES.index((df, dr))
+
+	# else:
+		# distance = max(abs(df), abs(dr))
+
+		# if distance == 0 or not (
+			# df == 0 or dr == 0 or abs(df) == abs(dr)
+		# ):
+			# raise ValueError("Invalid move geometry")
+
+		# direction = (
+			# int(np.sign(df)),
+			# int(np.sign(dr))
+		# )
+
+		# direction_idx = DIRECTIONS.index(direction)
+		# channel = direction_idx * 7 + distance - 1
+
+	# vec = np.zeros((8, 8, 73), dtype=np.float32)
+	# vec[r0, f0, channel] = 1.0
+
+	# return vec
+
+
+# def vec4672_to_uci(vec: np.ndarray, board: chess.Board) -> str:
+	# """
+	# Decode a policy tensor, selecting the highest-scoring
+	# legal move. Accepts one-hot vectors, logits or probabilities.
+	# """
+	# scores = np.asarray(vec).reshape(8, 8, 73)
+
+	# legal_moves = list(board.legal_moves)
+
+	# if not legal_moves:
+		# raise ValueError("No legal moves available")
+
+	# best_move = max(
+		# legal_moves,
+		# key=lambda move: scores[
+			# chess.square_rank(move.from_square),
+			# chess.square_file(move.from_square),
+			# np.argmax(uci_to_vec4672(move.uci())) % 73
+		# ]
+	# )
+
+	# return best_move.uci()
+
+
+###! naive incomplete categorical with python-chess dependency
+
+# def uci_to_vec4096(uci: str) -> np.ndarray:
+	# move = chess.Move.from_uci(uci)
+
+	# idx = move.from_square * 64 + move.to_square
+
+	# vec = np.zeros(ACTION_SIZE, dtype=np.float32)
+	# vec[idx] = 1.0
+	# return vec
+
+
+# def vec4096_to_uci(vec: np.ndarray, board: chess.Board) -> str:
+	# idx = int(np.argmax(vec))
+
+	# from_sq, to_sq = divmod(idx, 64)
+
+	# move = chess.Move(from_sq, to_sq)
+
+	# # Automatically promote to queen when appropriate
+	# piece = board.piece_at(from_sq)
+
+	# if (
+		# piece is not None
+		# and piece.piece_type == chess.PAWN
+		# and chess.square_rank(to_sq) in (0, 7)
+	# ):
+		# move.promotion = chess.QUEEN
+
+	# return move.uci()
+
+
+
+
 ### pipeline
 
 
+###! do: stream to batch from pgn / stream chunks to memory (+async)
+
 # type: (str) -> tuple[np.ndarray, list[str]]
-def pgn_to_supervised(pgn_path, max_games=None):
+def pgn_to_supervised(pgn_path, max_games=-1):
 	states = []
 	actions = []
 	game_counter = 0
@@ -225,7 +488,7 @@ def pgn_to_supervised(pgn_path, max_games=None):
 			
 			# init game if available
 			game = chess.pgn.read_game(pgn)
-			if game is None or game_counter >= max_games:
+			if game is None or (game_counter >= max_games and max_games > 0):
 				break
 			game_counter += 1
 			
@@ -268,8 +531,6 @@ def batch_generator_mono(data_x, batch_size, shuffle_key=None):
 			yield batch_x
 
 
-
-
 ###! no testing docs
 
 # # type: (list, (list)->list, int) -> list
@@ -290,7 +551,6 @@ def batch_generator_mono(data_x, batch_size, shuffle_key=None):
 		# result = [item for sublist in result for item in sublist]
 	
 	# return result
-
 
 
 ###! does not generalise
