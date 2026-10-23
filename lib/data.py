@@ -1,3 +1,6 @@
+# core
+import psutil
+
 # numerics
 import jax
 import jax.numpy as jnp
@@ -5,6 +8,16 @@ import numpy as np
 
 # environment
 import chess # python-chess
+import chess.pgn
+
+
+
+### utility
+
+def one_hot(class_idx, n_classes):
+	x = np.zeros((n_classes), dtype=np.float32)
+	x[class_idx] = 1.0
+	return x
 
 
 
@@ -22,10 +35,10 @@ def board_to_vec837(board):
 	
 	# set position state OHE vectors: (class) 0-5:white, 6-11:black
 	for pos_idx, piece in board.piece_map().items():
-		class_idx = piece.piece_type - 1 # [pawn, knight, bishop, rook, queen, king]
+		class_idx = piece.piece_type - 1 # classes: [pawn, knight, bishop, rook, queen, king]
 		if not piece.color:
 			class_idx += 6
-		vec837[pos_idx * 12 + cat_idx] = 1.0
+		vec837[pos_idx * 12 + class_idx] = 1.0
 	
 	# set turn state: (value) 0:black, 1:white
 	vec837[board_offset + 0] = board.turn
@@ -45,7 +58,7 @@ def board_to_vec837(board):
 
 
 
-### action encoding (AlphaZero encoding)
+### action encoding (AlphaZero encoding) (python-chess dependency)
 
 # define inter/+cardinal directions, (8*7) 0-55
 E4672_DIR = [
@@ -72,24 +85,22 @@ E4672_KNIGHT = [
 ]
 
 # define underpromotions, directional: (3*3) 64-72
-E4672_UNDER_PROM = ['n', 'b', 'r'] # [knight, bishop, rook]
+E4672_UNDER_PROM = [chess.KNIGHT, chess.BISHOP, chess.ROOK]
 
 
-# type: (str) -> np.ndarray
-def uci_to_vec4672(uci):
+# type: (chess.Move) -> int
+def move_to_idx4672(move):
 	
 	# determine to/from file/rank (col/row) indices
-	f0 = ord(uci[0]) - 97
-	r0 = int(uci[1]) - 1
-	f1 = ord(uci[2]) - 97
-	r1 = int(uci[3]) - 1
+	r0, f0 = divmod(move.from_square, 8)
+	r1, f1 = divmod(move.to_square, 8)
 	df = f1 - f0
 	dr = r1 - r0
 	
 	# handle promotion move offset
-	if len(uci) == 5 and uci[4] in E4672_UNDER_PROM:
+	if move.promotion and move.promotion in E4672_UNDER_PROM:
 		df_signed = df if dr > 0 else -df # if black pawn flip file sign
-		class_offset = 64 + (df_signed + 1) * 3 + E4672_UNDER_PROM.index(uci[4])
+		class_offset = 64 + (df_signed + 1) * 3 + (move.promotion - chess.KNIGHT)
 	
 	# handle knight move offset
 	elif (df, dr) in E4672_KNIGHT:
@@ -99,67 +110,56 @@ def uci_to_vec4672(uci):
 	else:
 		distance = max(abs(df), abs(dr))
 		direction = (np.sign(df), np.sign(dr))
-		class_offset = DIRECTIONS.index(direction) * 7 + distance - 1
+		class_offset = E4672_DIR.index(direction) * 7 + distance - 1
 	
-	# construct OHE vector
-	idx4672 = (r0 * 8 + f0) * 73 + class_offset
-	vec4672 = np.zeros(4672, dtype=np.float32)
-	vec4672[idx4672] = 1.0
-	
-	return vec
+	# determine class index and return
+	return (r0 * 8 + f0) * 73 + class_offset
 
 
-# type: (np.ndarray, int) -> str
-def vec4672_to_uci(vec, piece_class):
-	
-	# get argmax
-	vec_argmax = int(np.argmax(vec))
+# type: (int, chess.Board) -> str
+def idx4672_to_move(idx4672, board):
 	
 	# derive from-rank/from-file/action
-	sq, action = divmod(idx, 73)
-	r0, f0 = divmod(sq, 8)
+	from_square, action = divmod(idx4672, 73)
+	r0, f0 = divmod(from_square, 8)
 	
-	# initialise promotion character
-	promotion_chr = ''
+	# initialise promotion class (int)
+	promotion_class = None # no promotion
 	
 	# decode regular inter/+cardinal translation
 	if action < 56:
 		dir_idx, distance = divmod(action, 7)
 		df, dr = E4672_DIR[dir_idx]
-		df = distance + 1
-		dr = distance + 1
+		df *= distance + 1
+		dr *= distance + 1
 	
 	# decode knight translation
 	elif channel < 64:
-		dir_idx = action - 56
-		df, dr = E4672_KNIGHT[dir_idx]
+		df, dr = E4672_KNIGHT[action - 56]
 	
 	# decode under-promotion translation and character
 	else:
 		dir_class, piece_idx = divmod(channel - 64, 3)
 		dr = 1 if r0 == 6 else -1 # up if white, down if black
 		df = (dir_class - 1) * dr # right if white, left if black
-		promotion_chr = E4672_UNDER_PROM[piece_idx]
+		promotion_class = E4672_UNDER_PROM[piece_idx]
 	
 	# derive to-rank/to-file
 	r1 = r0 + dr
 	f1 = f0 + df
-	
-	# handle bound legality
-	if not (0 <= f1 < 8 and 0 <= r1 < 8):
-		raise ValueError("Action points outside the board") 
+	to_square = r1 * 8 + f1
 	
 	# handle implicit promotion
-	if piece_type == 1 and r1 in (0, 7) and promotion_chr == '':
-		promotion_chr = "q"
+	if board.piece_at(r0 * 8 + f0) == chess.PAWN and r1 in (0, 7) and promotion_str == None:
+		promotion_class = chess.QUEEN
 	
-	# construct UCI string and return
-	return f"{chr(97 + f0)}{r0 + 1}{chr(97 + f1)}{r1 + 1}{promotion}"
+	# construct chess.Move and return
+	return chess.Move(from_square, to_square, promotion=promotion_class)
 
 
 ###! E4672 with python-chess dependency
 
-# DIRECTIONS = [
+# E4672_DIR = [
     # (0, 1), (1, 1), (1, 0), (1, -1),
     # (0, -1), (-1, -1), (-1, 0), (-1, 1),
 # ]
@@ -201,7 +201,7 @@ def vec4672_to_uci(vec, piece_class):
     # else:
         # distance = max(abs(df), abs(dr))
         # direction = (df // distance, dr // distance)
-        # direction_idx = DIRECTIONS.index(direction)
+        # direction_idx = E4672_DIR.index(direction)
         # plane = direction_idx * 7 + distance - 1
 
     # index = move.from_square * 73 + plane
@@ -224,7 +224,7 @@ def vec4672_to_uci(vec, piece_class):
 
     # if plane < 56:
         # direction_idx, distance_idx = divmod(plane, 7)
-        # df, dr = DIRECTIONS[direction_idx]
+        # df, dr = E4672_DIR[direction_idx]
         # distance = distance_idx + 1
         # to_file = from_file + df * distance
         # to_rank = from_rank + dr * distance
@@ -348,7 +348,7 @@ def vec4672_to_uci(vec, piece_class):
 
 ###! E4672 3D with python chess dependency
 
-# DIRECTIONS = [
+# E4672_DIR = [
 	# (0, 1),    # N
 	# (1, 1),    # NE
 	# (1, 0),    # E
@@ -404,7 +404,7 @@ def vec4672_to_uci(vec, piece_class):
 			# int(np.sign(dr))
 		# )
 
-		# direction_idx = DIRECTIONS.index(direction)
+		# direction_idx = E4672_DIR.index(direction)
 		# channel = direction_idx * 7 + distance - 1
 
 	# vec = np.zeros((8, 8, 73), dtype=np.float32)
@@ -430,7 +430,83 @@ def vec4672_to_uci(vec, piece_class):
 		# key=lambda move: scores[
 			# chess.square_rank(move.from_square),
 			# chess.square_file(move.from_square),
-			# np.argmax(uci_to_vec4672(move.uci())) % 73
+			# np.argmax(uci_to_vec4672(move.
+
+# type: (np.ndarray, int, bool) ~> tuple[np.ndarray, np.ndarray]
+def batch_generator_mono(data_x, batch_size, shuffle_key=None):
+	
+	# yield infinite batches optionally shuffled
+	while True:
+		n_samples = len(data_x)
+		data_idx = jax.random.permutation(shuffle_key, n_samples) if (shuffle_key is not None) else jnp.array(range(n_samples))
+		for batch_data_idx in range(0, n_samples, batch_size):
+			batch_idx = data_idx[batch_data_idx:batch_data_idx+batch_size]
+			batch_x = data_x[batch_idx]
+			yield batch_x
+
+
+###! no testing docs
+
+# # type: (list, (list)->list, int) -> list
+# import multiprocessing
+# def multiprocess_list(list_data, list_fn, max_threads=999):
+	
+	# # determine thread count
+	# n_threads = min(multiprocessing.cpu_count(), max_threads)
+	# print(f"Using {n_threads} CPUs..")
+	
+	# # prepare jobs
+	# job_size = len(list_data) // n_threads
+	# job_data = [list_data[i:i+job_size] for i in range(0, len(list_data), job_size)]
+	
+	# # pool worker results
+	# with multiprocessing.Pool(n_threads) as pool:
+		# result = pool.map(list_fn, job_data)
+		# result = [item for sublist in result for item in sublist]
+	
+	# return result
+
+
+###! does not generalise
+
+# processing
+#from sklearn.preprocessing import MinMaxScaler
+
+# # type: (jax.PRNGKey, List[Tuple[float*4]], float, float, float, float) -> Tuple(Tuple(jnp.array*2, int)*3, MinMaxScaler)
+# def train_val_test_split(key, data_points, batch_size, part_buffer=0.0, part_train=0.7, part_val=0.05, part_test=0.25):
+	
+	# data_points = jnp.array(data_points)
+	
+	# # time-series partition with buffer, shuffle val+test together
+	# n_data = data_points.shape[0]
+	# n_buffer = int(part_buffer * n_data)
+	# n_train = int(part_train * n_data)
+	# n_val = int(part_val * n_data)
+	# n_test = int(part_test * n_data)
+	
+	# shuffle_idx = n_buffer + n_train + jax.random.permutation(key, n_val + n_test)
+	# data_train = data_points[n_buffer:n_buffer+n_train]
+	# data_val = data_points[shuffle_idx[:n_val]]
+	# data_test = data_points[shuffle_idx[n_val:]]
+	
+	# # unit scale
+	# data_scaler = MinMaxScaler(feature_range=(0, 1))
+	# data_scaler.fit(data_train)
+	# data_train = data_scaler.transform(data_train)
+	# data_val = data_scaler.transform(data_val)
+	# data_test = data_scaler.transform(data_test)
+	
+	# # supervised split
+	# train_x, train_y = data_train[:,:-1], data_train[:,-1] # xyt, z
+	# val_x, val_y = data_val[:,:-1], data_val[:,-1]
+	# test_x, test_y = data_test[:,:-1], data_test[:,-1]
+	
+	# # determine batch counts
+	# train_steps = int(jnp.ceil(train_x.shape[0] / batch_size))
+	# val_steps = int(jnp.ceil(val_x.shape[0] / batch_size))
+	# test_steps = int(jnp.ceil(test_x.shape[0] / batch_size))
+	
+	# return (train_x, train_y, train_steps), (val_x, val_y, val_steps), (test_x, test_y, test_steps), data_scaleruci())) % 73
 		# ]
 	# )
 
@@ -476,29 +552,44 @@ def vec4672_to_uci(vec, piece_class):
 
 ###! do: stream to batch from pgn / stream chunks to memory (+async)
 
-# type: (str) -> tuple[np.ndarray, list[str]]
-def pgn_to_supervised(pgn_path, max_games=-1):
+# type: (str) -> tuple[np.ndarray, np.ndarray]
+def pgn_to_supervised(pgn_path, max_games=-1, max_memory=0.99):
 	states = []
 	actions = []
 	game_counter = 0
+	max_memory_percent = 100 * max_memory
 	
 	# stream up to #max_games games from lichess PGN file
 	with open(pgn_path, "r", encoding="utf-8") as pgn:
-		while True:
+		
+		# read games
+		while max_games == -1 or game_counter < max_games:
+			
+			# mem safety
+			memory_percent = psutil.virtual_memory().percent
+			if memory_percent > max_memory_percent:
+				raise RuntimeError(f"memory_percent > max_memory_percent, {memory_percent} > {max_memory_percent}")
 			
 			# init game if available
 			game = chess.pgn.read_game(pgn)
-			if game is None or (game_counter >= max_games and max_games > 0):
+			if game is None:
 				break
 			game_counter += 1
+			board = game.board()
 			
-			# unpack moves from game
+			print(f"{game_counter} {memory_percent}%")
+			
+			# unpack moves from game and update
 			for move in game.mainline_moves():
 				states.append(board_to_vec837(game.board()))
-				actions.append(move.uci())
+				actions.append(one_hot(move_to_idx4672(move), 4672))
 				board.push(move)
 	
-	return np.asarray(states, dtype=np.float32), actions
+	# construct numpy arrays
+	data_x = np.asarray(states, dtype=np.float32)
+	data_y = np.asarray(actions, dtype=np.float32)
+	
+	return data_x, data_y
 
 
 # type: (np.ndarray, np.ndarray, int, bool) ~> tuple[np.ndarray, np.ndarray]
