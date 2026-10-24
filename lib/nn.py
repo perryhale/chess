@@ -7,9 +7,13 @@ import optax
 from data import batch_generator
 
 
+
+
+### model
+
+# type: (int, list[int], int, int) -> jax.Array
 def init_glorot_uniform(key, shape, fan_in, fan_out):
 	"""
-	# type: (int, list[int], int, int) -> jnp.array
 	# shape inZ+ (*)
 	# fan_in, fan_out inZ+
 	# w inR shape
@@ -19,10 +23,8 @@ def init_glorot_uniform(key, shape, fan_in, fan_out):
 	return w
 
 
+# type: (int, list[int]) -> list[tuple[jax.Array, jax.Array]]
 def init_dense_neural_network(key, layers):
-	"""
-	# type: (int, list[int]) -> list[tuple[jnp.array, jnp.array]]
-	"""
 	
 	# split key
 	k0, key = jax.random.split(key)
@@ -40,9 +42,9 @@ def init_dense_neural_network(key, layers):
 	return list(map(tuple, zip(w_list, b_list)))
 
 
+# type: (list[tuple[jax.Array, jax.Array]], jax.Array, Callable[[jax.Array], jax.Array]) -> jax.Array
 def dense_neural_network(params, x, ha=jax.nn.sigmoid):
 	"""
-	# type: (list[tuple[jnp.array*2]], jnp.array, jax.nn.[Activation functions]) -> jnp.array
 	# x inR (in, 1)
 	# z inR (out, 1)
 	"""
@@ -61,6 +63,11 @@ def dense_neural_network(params, x, ha=jax.nn.sigmoid):
 	return z
 
 
+
+
+### optimiser
+
+
 def fit(
 		key,
 		params,
@@ -73,10 +80,25 @@ def fit(
 		start_time=None
 	):
 	"""
-	Docstring
+	iteratively update params using gradient descent and scalar loss function on (data_x, data_y, train_steps=data_len/batch_size) training data.
+	validation data can be provided in the same format for evaluation _after_ every epoch.
+	batch_size:int, epochs:int and opt:base.GradientTransformationExtraArgs are provided as defaulting call arguments,
+	start_time:float optional argument for stdout time reporting.
+	
+	type: (
+		jax.Array,
+		PyTree[jax.Array],
+		Callable[[PyTree[jax.Array], jax.Array, jax.Array], float],
+		tuple[jax.Array, jax.Array, int],
+		tuple[jax.Array, jax.Array, int] | None,
+		int,
+		int,
+		optax.GradientTransformation,
+		float | None
+	) -> tuple[PyTree[jax.Array], Dict[str:list[float]]]
 	"""
 	
-	# unpack/initialise
+	# initialise
 	train_x, train_y, train_steps = train_data
 	opt_state = opt.init(params)
 	history = {'batch_loss':[], 'train_loss':[]}
@@ -87,6 +109,7 @@ def fit(
 	if start_time is None:
 		start_time = time.time()
 	
+	# jit optimiser core
 	@jax.jit
 	def opt_step(opt_state_, params_, x, y):
 		loss, grad = jax.value_and_grad(loss_fn)(params_, x, y)
@@ -94,11 +117,11 @@ def fit(
 		params_ = optax.apply_updates(params_, updates)
 		return loss, opt_state_, params_
 	
-	# fit model
+	# optimise
 	for i in range(epochs):
 		
 		# shuffle train batches
-		subkey, key = jax.random.split(key, 2)
+		key, subkey = jax.random.split(key, 2)
 		train_generator = batch_generator(train_x, train_y, batch_size, shuffle_key=subkey)
 		
 		# iterate optimiser
@@ -106,9 +129,7 @@ def fit(
 		for j in range(train_steps):
 			batch_loss, opt_state, params = opt_step(opt_state, params, *next(train_generator))
 			train_loss += batch_loss / train_steps
-			
 			history['batch_loss'].append(batch_loss)
-		
 		history['train_loss'].append(train_loss)
 		
 		# determine validation loss
@@ -116,41 +137,42 @@ def fit(
 			val_loss = 0.
 			for _ in range(val_steps):
 				val_loss += loss_fn(params, *next(val_generator)) / val_steps
-			
 			history['val_loss'].append(val_loss)
 		
-		# trace
+		# trace to stdout
 		print(f"epoch={i+1}, train_loss={train_loss:.4f}, val_loss={val_loss:.4f} [Elapsed time: {time.time()-start_time:.2f}s]")
 	
-	return (params, history)
+	return params, history
 
 
+
+
+### metrics
+
+###! do: check optax functions
+
+# type: (list[tuple[jax.Array]], int) -> float
 def lp_norm(p, order=2):
-	"""
-	# type: (list[tuple[jnp.array]], int) -> float
-	"""
 	assert order >= 1, "\"order\" must be greater than zero."
 	return jnp.sum(jnp.stack([jnp.sum(jnp.abs(leaf) ** order) for leaf in jax.tree_util.tree_leaves(p)])) ** (1.0 / order)
 
-
+# type: (jax.Array, jax.Array, float) -> float
 def loss_cce(yh, y, e=1e-9):
 	"""
-	# type: (jnp.array, jnp.array, float) -> float
 	# yh, y inR (*, out)
 	# loss inR
 	"""
 	return -jnp.mean(jnp.sum(y * jnp.log(yh + e), axis=-1))
 
-
+# type: (jax.Array, jax.Array, float) -> float
 def loss_mse(yh, y):
 	"""
-	# type: (jnp.array, jnp.array, float) -> float
 	# yh, y inR (*, out)
 	# loss inR
 	"""
 	return jnp.mean((yh-y)**2)
 
-
+# type: () ->
 def accuracy_score(yh, y):
 	"""	
 	# yh, y inR (*, n_classes)
@@ -161,12 +183,8 @@ def accuracy_score(yh, y):
 	accuracy = jnp.mean(jnp.array(yhc==yc, dtype='int32'))
 	return accuracy
 
-
+# type: (list[tuple[jax.Array]]) -> int
 def count_params(params):
-	"""
-	# type: (list[tuple[jnp.array]]) -> int
-	"""
-	
 	if isinstance(params, jnp.ndarray):
 		return jnp.prod(jnp.array(params.shape))
 	elif isinstance(params, (list, tuple)):

@@ -23,7 +23,7 @@ def one_hot(class_idx, n_classes):
 
 
 
-### state encoding (positions OHE + special states, concatenated)
+### state encoder (positions OHE + turn + castling + enpassant)
 
 # type: (chess.Board) -> np.ndarray
 def board_to_vec837(board):
@@ -57,9 +57,72 @@ def board_to_vec837(board):
 	return vec837
 
 
+###! + state decoder
+
+# # type: (np.ndarray) -> chess.Board
+# def vec837_to_board(vec837):
+    # vec837 = np.asarray(vec837)
+    # if vec837.size != 837:
+        # raise ValueError(f"Expected 837 values, got {vec837.size}")
+
+    # vec837 = vec837.reshape(837)
+    # board = chess.Board(None)  # start with an empty board
+
+    # # Decode piece positions: 64 squares × 12 classes
+    # pieces = vec837[:768].reshape(64, 12)
+    # for square, row in enumerate(pieces):
+        # class_idx = int(np.argmax(row))
+        # if row[class_idx] > 0.5:
+            # piece_type = (class_idx % 6) + 1
+            # color = class_idx < 6  # classes 0–5 white, 6–11 black
+            # board.set_piece_at(square, chess.Piece(piece_type, color))
+
+    # # Decode turn
+    # state = vec837[768:]
+    # board.turn = bool(state[0])
+
+    # # Decode castling rights. python-chess stores these as rook-square bits.
+    # rights = chess.BB_EMPTY
+    # for color, kingside_idx, queenside_idx in (
+        # (chess.WHITE, 1, 2),
+        # (chess.BLACK, 3, 4),
+    # ):
+        # rank = 0 if color == chess.WHITE else 7
+        # king = board.king(color)
+
+        # if king is not None:
+            # if state[kingside_idx] > 0.5:
+                # rooks = [
+                    # sq for sq in chess.SQUARES
+                    # if chess.square_rank(sq) == rank
+                    # and chess.square_file(sq) > chess.square_file(king)
+                    # and board.piece_at(sq) == chess.Piece(chess.ROOK, color)
+                # ]
+                # if rooks:
+                    # rights |= chess.BB_SQUARES[max(rooks)]
+
+            # if state[queenside_idx] > 0.5:
+                # rooks = [
+                    # sq for sq in chess.SQUARES
+                    # if chess.square_rank(sq) == rank
+                    # and chess.square_file(sq) < chess.square_file(king)
+                    # and board.piece_at(sq) == chess.Piece(chess.ROOK, color)
+                # ]
+                # if rooks:
+                    # rights |= chess.BB_SQUARES[min(rooks)]
+
+    # board.castling_rights = rights
+
+    # # Decode en-passant square (state indices 5–68)
+    # ep = state[5:69]
+    # board.ep_square = int(np.argmax(ep)) if ep.max() > 0.5 else None
+
+    # return board
 
 
-### action encoding (AlphaZero encoding)
+
+
+### action encoder / decoder (AlphaZero format)
 
 # define inter/+cardinal directions, (8*7) 0-55
 E4672_DIR = [
@@ -161,43 +224,52 @@ def idx4672_to_move(idx4672, vec837):
 	return chess.Move(from_square, to_square, promotion=promotion_class)
 
 
+###! + E4672 legality mask
+
+# def legality_mask(board):
+    # """Return a bool array of shape (4672,), true for legal actions."""
+    # mask = np.zeros(64 * 73, dtype=np.bool_)
+    # for move in board.legal_moves:
+        # mask[move_to_action_index(move, board)] = True
+    # return mask
+
+
 
 
 ### pipeline
 
+###! impl scope: stream to batch from pgn / stream blocks to memory (+async)
 
-###! do: stream to batch from pgn / stream chunks to memory (+async)
-
-# type: (str) -> tuple[np.ndarray, np.ndarray]
-def pgn_to_supervised(pgn_path, max_games=-1, max_memory=0.95):
+# type: (TextIO, int, float, int) -> tuple[np.ndarray, np.ndarray]
+def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1):
 	states = []
 	actions = []
-	game_counter = 0
+	move_counter = 0
 	max_memory_percent = 100 * max_memory
 	
 	# stream up to #max_games games from lichess PGN file
-	with open(pgn_path, "r", encoding="utf-8") as pgn:
-		while max_games == -1 or game_counter < max_games:
-			
-			# mem safety
-			memory_percent = psutil.virtual_memory().percent
-			if memory_percent > max_memory_percent:
-				raise RuntimeError(f"memory_percent > max_memory_percent, {memory_percent} > {max_memory_percent}")
-			
-			# init game if available
-			game = chess.pgn.read_game(pgn)
-			if game is None:
-				break
-			game_counter += 1
-			board = game.board()
-			
-			print(f"{game_counter} {memory_percent}%")
-			
-			# unpack moves from game and update
-			for move in game.mainline_moves():
-				states.append(board_to_vec837(game.board()))
+	while max_moves < 0 or move_counter < max_moves:
+		
+		# mem safety
+		memory_percent = psutil.virtual_memory().percent
+		if memory_percent > max_memory_percent:
+			raise RuntimeError(f"memory_percent > max_memory_percent, {memory_percent} > {max_memory_percent}")
+		
+		# initialise game (check EOF)
+		game = chess.pgn.read_game(pgn_textio)
+		if game is None:
+			break
+		board = game.board()
+		
+		# encode all states and moves from game (check max_moves)
+		for move in game.mainline_moves():
+			if max_moves < 0 or move_counter < max_moves:
+				states.append(board_to_vec837(board))
 				actions.append(one_hot(move_to_idx4672(move), 4672))
 				board.push(move)
+				move_counter += 1
+				if debug > 0 and move_counter % debug == 0:
+					print(f"{move_counter} {memory_percent}%")
 	
 	# construct numpy arrays
 	data_x = np.asarray(states, dtype=np.float32)
