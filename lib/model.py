@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from data import batch_generator
+from .data import batch_generator
 
 
 
@@ -42,7 +42,7 @@ def init_dense_neural_network(key, layers):
 	return list(map(tuple, zip(w_list, b_list)))
 
 
-# type: (list[tuple[jax.Array, jax.Array]], jax.Array, Callable[[jax.Array], jax.Array]) -> jax.Array
+# type: (list[tuple[jax.Array, jax.Array]], jax.Array, Callable[[jax.Array]]) -> jax.Array
 def dense_neural_network(params, x, ha=jax.nn.sigmoid):
 	"""
 	# x inR (in, 1)
@@ -60,7 +60,7 @@ def dense_neural_network(params, x, ha=jax.nn.sigmoid):
 	wn, bn = params[-1]
 	z = jnp.dot(wn, h) + bn
 	
-	return z
+	return z.reshape(-1)
 
 
 
@@ -140,7 +140,11 @@ def fit(
 			history['val_loss'].append(val_loss)
 		
 		# trace to stdout
-		print(f"epoch={i+1}, train_loss={train_loss:.4f}, val_loss={val_loss:.4f} [Elapsed time: {time.time()-start_time:.2f}s]")
+		print(
+			f"epoch={i+1}, train_loss={train_loss:.4f},"
+			+ (f" val_loss={val_loss:.4f}" if val_data is not None else "")
+			+ f" [Elapsed time: {time.time() - start_time:.2f}s]"
+		)
 	
 	return params, history
 
@@ -148,29 +152,6 @@ def fit(
 
 
 ### metrics
-
-###! do: check optax functions
-
-# type: (list[tuple[jax.Array]], int) -> float
-def lp_norm(p, order=2):
-	assert order >= 1, "\"order\" must be greater than zero."
-	return jnp.sum(jnp.stack([jnp.sum(jnp.abs(leaf) ** order) for leaf in jax.tree_util.tree_leaves(p)])) ** (1.0 / order)
-
-# type: (jax.Array, jax.Array, float) -> float
-def loss_cce(yh, y, e=1e-9):
-	"""
-	# yh, y inR (*, out)
-	# loss inR
-	"""
-	return -jnp.mean(jnp.sum(y * jnp.log(yh + e), axis=-1))
-
-# type: (jax.Array, jax.Array, float) -> float
-def loss_mse(yh, y):
-	"""
-	# yh, y inR (*, out)
-	# loss inR
-	"""
-	return jnp.mean((yh-y)**2)
 
 # type: () ->
 def accuracy_score(yh, y):
