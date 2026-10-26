@@ -6,10 +6,12 @@ import numpy as np
 import chess
 
 from lib.data import (
-	board_to_vec837,
 	move_to_idx4672,
 	idx4672_to_move,
-	stream_pgn_to_supervised
+	board_to_vec837,
+	vec837_to_board,
+	vec837_to_mask4672,
+	stream_pgn_to_supervised,
 )
 from lib.model import (
 	init_dense_neural_network,
@@ -26,8 +28,12 @@ print(f"[Elapsed time: {time.time() - start_time:.2f}s]")
 # test state encoding
 board = chess.Board()
 state = board_to_vec837(board)
+board_h = vec837_to_board(state)
+state_h = board_to_vec837(board_h)
 print(f"{board}")
 print(f"{''.join(['|' if bool(s) else '.' for s in state])}")
+print(f"{board_h}")
+print(f"{''.join(['|' if bool(s) else '.' for s in state_h])}")
 
 
 # test action encoding
@@ -49,10 +55,8 @@ lichess_pgn = open("data/lichess_db_standard_rated_2017-03.pgn", "r", encoding="
 
 data_x, data_y = stream_pgn_to_supervised(lichess_pgn, max_moves=50) # ; import pdb; pdb.set_trace() ###! numpy array takes up more memory than lists
 data_yh = np.array([idx4672_to_move(int(i),s) for i,s in zip(data_y, data_x)])
-
 data_x1, data_y1 = stream_pgn_to_supervised(lichess_pgn, max_moves=50)
 data_yh1 = np.array([idx4672_to_move(int(i),s) for i,s in zip(data_y1, data_x1)])
-
 data_x_differ = bool(np.any(data_x != data_x1))
 data_y_differ = bool(np.any(data_y != data_y1))
 
@@ -67,7 +71,7 @@ print(f"{data_y_differ=}")
 print(f"[Elapsed time: {time.time() - start_time:.2f}s]")
 
 try:
-	_ = stream_pgn_to_supervised(lichess_pgn, max_memory=0.33, debug=10_000)
+	_ = stream_pgn_to_supervised(lichess_pgn, max_memory=0.1, debug=10_000)
 except RuntimeError as e:
 	print(e)
 	print(f"[Elapsed time: {time.time() - start_time:.2f}s]")
@@ -80,30 +84,39 @@ lichess_pgn = open("data/lichess_db_standard_rated_2017-03.pgn", "r", encoding="
 
 k0 = jax.random.key(9)
 params = init_dense_neural_network(k0, [837, 512, 512, 4672])
-model = jax.vmap(lambda p, x, m: dense_neural_network(p, x) + m, in_axes=(None, 0, 0))
-loss = lambda p, xs, ys, ms: jnp.mean(optax.softmax_cross_entropy_with_integer_labels(model(p, xs, ms), ys))
+model = jax.vmap(lambda p, x: dense_neural_network(p, x[:837]) + x[837:], in_axes=(None, 0)) ###! x:bool -> cast to float at call (much less memory)
+loss = lambda p, xs, ys: jnp.mean(optax.softmax_cross_entropy_with_integer_labels(model(p, xs), ys))
 
+batch_size = 256
 train_block_count = 8
-train_block_size = 256
-batch_size = 32
-train_steps = train_block_size // batch_size
+train_block_size = 100_000
+val_block_size = 2048
+train_steps = int(np.ceil(train_block_size / batch_size))
 
-start_time = time.time()
+val_x, val_y = stream_pgn_to_supervised(lichess_pgn, max_moves=val_block_size)
+val_x = jnp.concatenate((val_x, jnp.array([vec837_to_mask4672(x) for x in val_x])), axis=-1)
+val_y = jnp.array(val_y)
+val_steps = int(np.ceil(val_block_size / batch_size))
+
 for _ in range(train_block_count):
-	train_x, train_y = stream_pgn_to_supervised(lichess_pgn, max_moves=train_block_size)
-	train_x = jnp.array(train_x)
+	train_x, train_y = stream_pgn_to_supervised(lichess_pgn, max_moves=train_block_size, debug=20_000)
+	train_x = jnp.concatenate((train_x, jnp.array([vec837_to_mask4672(x) for x in train_x])), axis=-1) ###! pre-compute mask and pack into input
 	train_y = jnp.array(train_y)
-	train_mask = jnp.array([vec837_to_mask4672(x) for x in train_x]) ###! requires env calls
+	
 	k0, k1 = jax.random.split(k0)
 	params, history = fit(
 		k1,
 		params,
 		loss,
-		(train_x, train_y, train_steps), ###! must pre-compute mask, cannot be jitted, rework fit(), model(), loss() for optional mask
+		(train_x, train_y, train_steps),
+		val_data=(val_x, val_y, val_steps),
 		batch_size=batch_size,
 		epochs=1,
 		opt=optax.adamw(1e-5),
 		start_time=start_time
 	)
+	
+	del train_x
+	del train_y
 
 lichess_pgn.close()

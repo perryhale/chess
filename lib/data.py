@@ -10,129 +10,42 @@ import numpy as np
 import chess # python-chess
 import chess.pgn
 
+"""
 
+Environment <--> Model
+______________________
+
+chess.Board <--> E837       | state encoding
+chess.Move  <--> E4672      | action encoding
+chess.Board ---> M4672 *    | action mask (legal)
+
+* E837 - - > chess.Board - - > M4672
+
+Data loader
+______________________
+
+|                       |   - all (state, action) pairs
+|       |       |       |   - load blocks into memory
+| | | | | | | | | | | | |   - yield batches from memory
+
+1. open pgn textio stream
+2. stream #max_moves (state, action) pairs into memory
+3. yield batches from memory
+4. go to (2) when no more new batches and not stopping condition
+
+"""
 
 
 ### utility
 
 def one_hot(class_idx, n_classes):
-	x = np.zeros((n_classes), dtype=np.float32)
+	x = np.zeros(n_classes, dtype=np.float32)
 	x[class_idx] = 1.0
 	return x
 
 
-
-
-### state encoder / decoder / masker (positions OHE + turn + castling + enpassant)
-
-# type: (chess.Board) -> np.ndarray
-def board_to_vec837(board):
-	
-	# init array
-	vec837 = np.zeros((837), dtype=np.float32)
-	
-	# init constants
-	board_offset = 64 * 12
-	
-	# set position state OHE vectors: (class) 0-5:white, 6-11:black
-	for pos_idx, piece in board.piece_map().items():
-		class_idx = piece.piece_type - 1 # classes: [pawn, knight, bishop, rook, queen, king]
-		if not piece.color:
-			class_idx += 6
-		vec837[pos_idx * 12 + class_idx] = 1.0
-	
-	# set turn state: (value) 0:black, 1:white
-	vec837[board_offset + 0] = board.turn
-	
-	# set castling states: (value) 0: unavailable, 1: available
-	vec837[board_offset + 1] = board.has_kingside_castling_rights(chess.WHITE)
-	vec837[board_offset + 2] = board.has_queenside_castling_rights(chess.WHITE)
-	vec837[board_offset + 3] = board.has_kingside_castling_rights(chess.BLACK)
-	vec837[board_offset + 4] = board.has_queenside_castling_rights(chess.BLACK)
-	
-	# set en-passant states: (value) 0: unavailable, 1: available
-	if board.ep_square is not None:
-		vec837[board_offset + 5 + board.ep_square] = 1.0
-	
-	return vec837
-
-
-###! + state decoder
-
-# # type: (np.ndarray) -> chess.Board
-# def vec837_to_board(vec837):
-	# vec837 = np.asarray(vec837)
-	# if vec837.size != 837:
-		# raise ValueError(f"Expected 837 values, got {vec837.size}")
-
-	# vec837 = vec837.reshape(837)
-	# board = chess.Board(None)  # start with an empty board
-
-	# # Decode piece positions: 64 squares × 12 classes
-	# pieces = vec837[:768].reshape(64, 12)
-	# for square, row in enumerate(pieces):
-		# class_idx = int(np.argmax(row))
-		# if row[class_idx] > 0.5:
-			# piece_type = (class_idx % 6) + 1
-			# color = class_idx < 6  # classes 0–5 white, 6–11 black
-			# board.set_piece_at(square, chess.Piece(piece_type, color))
-
-	# # Decode turn
-	# state = vec837[768:]
-	# board.turn = bool(state[0])
-
-	# # Decode castling rights. python-chess stores these as rook-square bits.
-	# rights = chess.BB_EMPTY
-	# for color, kingside_idx, queenside_idx in (
-		# (chess.WHITE, 1, 2),
-		# (chess.BLACK, 3, 4),
-	# ):
-		# rank = 0 if color == chess.WHITE else 7
-		# king = board.king(color)
-
-		# if king is not None:
-			# if state[kingside_idx] > 0.5:
-				# rooks = [
-					# sq for sq in chess.SQUARES
-					# if chess.square_rank(sq) == rank
-					# and chess.square_file(sq) > chess.square_file(king)
-					# and board.piece_at(sq) == chess.Piece(chess.ROOK, color)
-				# ]
-				# if rooks:
-					# rights |= chess.BB_SQUARES[max(rooks)]
-
-			# if state[queenside_idx] > 0.5:
-				# rooks = [
-					# sq for sq in chess.SQUARES
-					# if chess.square_rank(sq) == rank
-					# and chess.square_file(sq) < chess.square_file(king)
-					# and board.piece_at(sq) == chess.Piece(chess.ROOK, color)
-				# ]
-				# if rooks:
-					# rights |= chess.BB_SQUARES[min(rooks)]
-
-	# board.castling_rights = rights
-
-	# # Decode en-passant square (state indices 5–68)
-	# ep = state[5:69]
-	# board.ep_square = int(np.argmax(ep)) if ep.max() > 0.5 else None
-
-	# return board
-
-
-###! + E4672 action legality mask
-
-# type: (np.ndarray) -> np.ndarray
-def vec837_to_mask4672(vec837):
-	mask = np.full(4672, -np.inf, dtype=np.float32)
-	for move in vec837_to_board(vec837).legal_moves:
-		mask[move_to_idx4672(move)] = 0.0
-	return mask
-
-
-
-
-### action encoder / decoder (AlphaZero format)
+### action encoder / decoder
+## AlphaZero format
 
 # define inter/+cardinal directions, (8*7) 0-55
 E4672_DIR = [
@@ -153,13 +66,13 @@ E4672_KNIGHT = [
 	(2, -1),  # right down
 	(1, -2),  # down right
 	(-1, -2), # down left
-	(-2, -1), # 
-	(-2, 1),
-	(-1, 2),
+	(-2, -1), # left down
+	(-2, 1),  # left up
+	(-1, 2),  # up left
 ]
 
 # define underpromotions, directional: (3*3) 64-72
-E4672_UNDER_PROM = [chess.KNIGHT, chess.BISHOP, chess.ROOK]
+E4672_UNDER_PROM = [chess.KNIGHT, chess.BISHOP, chess.ROOK] # [1, 2, 3]
 
 
 # type: (chess.Move) -> int
@@ -234,10 +147,113 @@ def idx4672_to_move(idx4672, vec837):
 	return chess.Move(from_square, to_square, promotion=promotion_class)
 
 
+### state encoder / decoder / action mask
+## concatenate positions OHE [768] + turn [1] + castling [4] + enpassant [64]
+
+# type: (chess.Board) -> np.ndarray
+def board_to_vec837(board):
+	
+	# init array
+	vec837 = np.zeros((837), dtype=np.float32)
+	
+	# init constants
+	board_offset = 64 * 12
+	
+	# set position state OHE vectors: (class) 0-5:white, 6-11:black
+	for pos_idx, piece in board.piece_map().items():
+		class_idx = piece.piece_type - 1 # classes: [pawn, knight, bishop, rook, queen, king]
+		if not piece.color:
+			class_idx += 6
+		vec837[pos_idx * 12 + class_idx] = 1.0
+	
+	# set turn state: (value) 0:black, 1:white
+	vec837[board_offset + 0] = board.turn
+	
+	# set castling states: (value) 0: unavailable, 1: available
+	vec837[board_offset + 1] = board.has_kingside_castling_rights(chess.WHITE)
+	vec837[board_offset + 2] = board.has_queenside_castling_rights(chess.WHITE)
+	vec837[board_offset + 3] = board.has_kingside_castling_rights(chess.BLACK)
+	vec837[board_offset + 4] = board.has_queenside_castling_rights(chess.BLACK)
+	
+	# set en-passant states: (value) 0: unavailable, 1: available
+	if board.ep_square is not None:
+		vec837[board_offset + 5 + board.ep_square] = 1.0
+	
+	return vec837
 
 
-### pipeline
+# type: (np.ndarray) -> chess.Board
+###! + state decoder
+def vec837_to_board(vec837):
+	
+	# init empty board
+	board = chess.Board(None)
+	board_offset = 64 * 12
+	
+	# decode and set pieces
+	squares_ohe = vec837[:board_offset].reshape(64, 12)
+	squares_class = np.argmax(squares_ohe, axis=-1)
+	squares_full = np.take_along_axis(squares_ohe, squares_class[..., None], axis=-1).squeeze(-1) > 0.5
+	squares_type = (squares_class % 6) + 1
+	squares_col = squares_class < 6
+	for sq, (f, t, c) in enumerate(zip(squares_full, squares_type, squares_col)):
+		if bool(f):
+			board.set_piece_at(sq, chess.Piece(int(t), bool(c)))
+	
+	# decode turn
+	board.turn = bool(vec837[board_offset + 0])
+	
+	# decode castling rights
+	castling_rights = chess.BB_EMPTY ###! 4 bit int
+	
+	for color, kingside_right_idx, queenside_right_idx in [
+		(chess.WHITE, board_offset + 1, board_offset + 2),
+		(chess.BLACK, board_offset + 3, board_offset + 4),
+	]:
+		
+		# get home rank and king square (check for king)
+		color_rank = 0 if color == chess.WHITE else 7
+		king_square = board.king(color)
+		if king_square is None:
+			continue
+		
+		# get rooks on home rank
+		rook_squares = board.pieces(chess.ROOK, color) & chess.BB_RANKS[color_rank] # bitwise and
+		
+		for right_idx, is_kingside in [
+			(kingside_right_idx, True),
+			(queenside_right_idx, False),
+		]:
+			if vec837[right_idx] <= 0.5: # (check right)
+				continue
+			
+			# get rooks to right of king if kingside else left of king if queenside
+			rook_candidates = [sq for sq in rook_squares if (sq % 8 > king_square % 8) == is_kingside]
+			
+			# update castling rights with bitboard corresponding to rightmost rook of kingside else leftmost rook
+			if rook_candidates:
+				rook_sq = max(rook_candidates) if is_kingside else min(rook_candidates)
+				castling_rights |= chess.BB_SQUARES[rook_sq] # bitwise or
+	
+	board.castling_rights = castling_rights
+	
+	# decode en-passant square
+	ep_squares = vec837[board_offset + 5:]
+	ep_square = np.argmax(ep_squares)
+	board.ep_square = int(ep_square) if ep_squares[ep_square] > 0.5 else None
 
+	return board
+
+
+# type: (np.ndarray) -> np.ndarray
+def vec837_to_mask4672(vec837):
+	mask = np.full(4672, -np.inf, dtype=np.float32)
+	for move in vec837_to_board(vec837).legal_moves:
+		mask[move_to_idx4672(move)] = 0.0
+	return mask
+
+
+### data loader
 ###! impl scope: stream to batch from pgn / stream blocks to memory (+async)
 
 # type: (TextIO, int, float, int) -> tuple[np.ndarray, np.ndarray]

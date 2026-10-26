@@ -6,7 +6,13 @@ import optax
 
 from .data import batch_generator
 
+"""
 
+
+
+
+
+"""
 
 
 ### model
@@ -61,8 +67,6 @@ def dense_neural_network(params, x, ha=jax.nn.sigmoid):
 	z = jnp.dot(wn, h) + bn
 	
 	return z.reshape(-1)
-
-
 
 
 ### optimiser
@@ -147,8 +151,6 @@ def fit(
 		)
 	
 	return params, history
-
-
 
 
 ### metrics
