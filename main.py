@@ -83,24 +83,25 @@ lichess_pgn.close()
 lichess_pgn = open("data/lichess_db_standard_rated_2017-03.pgn", "r", encoding="utf-8")
 
 k0 = jax.random.key(9)
-params = init_dense_neural_network(k0, [837, 512, 512, 4672])
-model = jax.vmap(lambda p, x: dense_neural_network(p, x[:837]) + x[837:], in_axes=(None, 0)) ###! x:bool -> cast to float at call (much less memory)
+params = init_dense_neural_network(k0, [837, 512, 512, 512, 4672])
+model = jax.vmap(lambda p, x: jnp.where(x[837:], -jnp.inf, dense_neural_network(p, x[:837].astype(jnp.float32))), in_axes=(None, 0))
 loss = lambda p, xs, ys: jnp.mean(optax.softmax_cross_entropy_with_integer_labels(model(p, xs), ys))
 
 batch_size = 256
-train_block_count = 8
-train_block_size = 100_000
-val_block_size = 2048
-train_steps = int(np.ceil(train_block_size / batch_size))
+train_block_count = 4
+train_block_size = 1_000_000
+val_block_size = 8192
 
-val_x, val_y = stream_pgn_to_supervised(lichess_pgn, max_moves=val_block_size)
-val_x = jnp.concatenate((val_x, jnp.array([vec837_to_mask4672(x) for x in val_x])), axis=-1)
+val_x, val_y = stream_pgn_to_supervised(lichess_pgn, max_moves=val_block_size, debug=val_block_size)
+val_x = jnp.concatenate([val_x, jnp.array([vec837_to_mask4672(x) for x in val_x])], axis=-1)
 val_y = jnp.array(val_y)
 val_steps = int(np.ceil(val_block_size / batch_size))
 
+train_steps = int(np.ceil(train_block_size / batch_size))
+
 for _ in range(train_block_count):
-	train_x, train_y = stream_pgn_to_supervised(lichess_pgn, max_moves=train_block_size, debug=20_000)
-	train_x = jnp.concatenate((train_x, jnp.array([vec837_to_mask4672(x) for x in train_x])), axis=-1) ###! pre-compute mask and pack into input
+	train_x, train_y = stream_pgn_to_supervised(lichess_pgn, max_moves=train_block_size, debug=train_block_size//5)
+	train_x = jnp.concatenate([train_x, jnp.array([vec837_to_mask4672(x) for x in train_x])], axis=-1) ###! pre-compute mask and pack into input
 	train_y = jnp.array(train_y)
 	
 	k0, k1 = jax.random.split(k0)

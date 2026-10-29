@@ -1,10 +1,11 @@
 # core
+import time
 import psutil
 
 # numerics
 import jax
 import jax.numpy as jnp
-import numpy as np
+import numpy as np ###! todo use jnp only, optimise host<->accel coms
 
 # environment
 import chess # python-chess
@@ -154,7 +155,7 @@ def idx4672_to_move(idx4672, vec837):
 def board_to_vec837(board):
 	
 	# init array
-	vec837 = np.zeros((837), dtype=np.float32)
+	vec837 = np.zeros((837), dtype=np.bool_)
 	
 	# init constants
 	board_offset = 64 * 12
@@ -164,7 +165,7 @@ def board_to_vec837(board):
 		class_idx = piece.piece_type - 1 # classes: [pawn, knight, bishop, rook, queen, king]
 		if not piece.color:
 			class_idx += 6
-		vec837[pos_idx * 12 + class_idx] = 1.0
+		vec837[pos_idx * 12 + class_idx] = True
 	
 	# set turn state: (value) 0:black, 1:white
 	vec837[board_offset + 0] = board.turn
@@ -177,7 +178,7 @@ def board_to_vec837(board):
 	
 	# set en-passant states: (value) 0: unavailable, 1: available
 	if board.ep_square is not None:
-		vec837[board_offset + 5 + board.ep_square] = 1.0
+		vec837[board_offset + 5 + board.ep_square] = True
 	
 	return vec837
 
@@ -192,11 +193,11 @@ def vec837_to_board(vec837):
 	
 	# decode and set pieces
 	squares_ohe = vec837[:board_offset].reshape(64, 12)
-	squares_class = np.argmax(squares_ohe, axis=-1)
-	squares_full = np.take_along_axis(squares_ohe, squares_class[..., None], axis=-1).squeeze(-1) > 0.5
+	squares_class = np.argmax(squares_ohe, axis=-1) ###! (valid for) bool
+	squares_full = np.take_along_axis(squares_ohe, squares_class[..., None], axis=-1).squeeze(-1) ###! bool
 	squares_type = (squares_class % 6) + 1
-	squares_col = squares_class < 6
-	for sq, (f, t, c) in enumerate(zip(squares_full, squares_type, squares_col)):
+	squares_color = squares_class < 6
+	for sq, (f, t, c) in enumerate(zip(squares_full, squares_type, squares_color)):
 		if bool(f):
 			board.set_piece_at(sq, chess.Piece(int(t), bool(c)))
 	
@@ -224,7 +225,7 @@ def vec837_to_board(vec837):
 			(kingside_right_idx, True),
 			(queenside_right_idx, False),
 		]:
-			if vec837[right_idx] <= 0.5: # (check right)
+			if not vec837[right_idx]: # (check right)
 				continue
 			
 			# get rooks to right of king if kingside else left of king if queenside
@@ -241,15 +242,15 @@ def vec837_to_board(vec837):
 	ep_squares = vec837[board_offset + 5:]
 	ep_square = np.argmax(ep_squares)
 	board.ep_square = int(ep_square) if ep_squares[ep_square] > 0.5 else None
-
+	
 	return board
 
 
 # type: (np.ndarray) -> np.ndarray
 def vec837_to_mask4672(vec837):
-	mask = np.full(4672, -np.inf, dtype=np.float32)
+	mask = np.ones(4672, dtype=np.bool_)
 	for move in vec837_to_board(vec837).legal_moves:
-		mask[move_to_idx4672(move)] = 0.0
+		mask[move_to_idx4672(move)] = False
 	return mask
 
 
@@ -288,7 +289,7 @@ def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1
 					print(f"{move_counter} {memory_percent}%")
 	
 	# construct numpy arrays
-	data_x = np.asarray(states, dtype=np.float32)
+	data_x = np.asarray(states, dtype=np.bool_)
 	data_y = np.asarray(actions, dtype=np.int32)
 	
 	return data_x, data_y
