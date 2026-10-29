@@ -10,7 +10,6 @@ from lib.data import (
 	idx4672_to_move,
 	board_to_vec837,
 	vec837_to_board,
-	vec837_to_mask4672,
 	stream_pgn_to_supervised,
 )
 from lib.model import (
@@ -89,20 +88,15 @@ loss = lambda p, xs, ys: jnp.mean(optax.softmax_cross_entropy_with_integer_label
 
 batch_size = 256
 train_block_count = 4
-train_block_size = 1_000_000
+train_block_size = 250_000
 val_block_size = 8192
 
 val_x, val_y = stream_pgn_to_supervised(lichess_pgn, max_moves=val_block_size, debug=val_block_size)
-val_x = jnp.concatenate([val_x, jnp.array([vec837_to_mask4672(x) for x in val_x])], axis=-1)
-val_y = jnp.array(val_y)
 val_steps = int(np.ceil(val_block_size / batch_size))
-
 train_steps = int(np.ceil(train_block_size / batch_size))
 
 for _ in range(train_block_count):
 	train_x, train_y = stream_pgn_to_supervised(lichess_pgn, max_moves=train_block_size, debug=train_block_size//5)
-	train_x = jnp.concatenate([train_x, jnp.array([vec837_to_mask4672(x) for x in train_x])], axis=-1) ###! pre-compute mask and pack into input
-	train_y = jnp.array(train_y)
 	
 	k0, k1 = jax.random.split(k0)
 	params, history = fit(

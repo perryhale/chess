@@ -4,6 +4,8 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from tqdm import tqdm
+
 from .data import batch_generator
 
 """
@@ -130,17 +132,18 @@ def fit(
 		
 		# iterate optimiser
 		train_loss = 0.
-		for j in range(train_steps):
+		for j in tqdm(range(train_steps)):
 			batch_loss, opt_state, params = opt_step(opt_state, params, *next(train_generator))
-			train_loss += batch_loss / train_steps
+			batch_loss = float(batch_loss) ###! implicit accel->host
+			train_loss += batch_loss / train_steps ###! un-optimised denominator
 			history['batch_loss'].append(batch_loss)
 		history['train_loss'].append(train_loss)
 		
 		# determine validation loss
 		if val_data is not None:
 			val_loss = 0.
-			for _ in range(val_steps):
-				val_loss += loss_fn(params, *next(val_generator)) / val_steps
+			for _ in tqdm(range(val_steps)):
+				val_loss += float(loss_fn(params, *next(val_generator))) / val_steps ###! implicit accel->host, un-optimised denominator
 			history['val_loss'].append(val_loss)
 		
 		# trace to stdout

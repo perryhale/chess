@@ -18,9 +18,7 @@ ______________________
 
 chess.Board <--> E837       | state encoding
 chess.Move  <--> E4672      | action encoding
-chess.Board ---> M4672 *    | action mask (legal)
-
-* E837 - - > chess.Board - - > M4672
+chess.Board ---> M4672      | legal action mask
 
 Data loader
 ______________________
@@ -30,7 +28,7 @@ ______________________
 | | | | | | | | | | | | |   - yield batches from memory
 
 1. open pgn textio stream
-2. stream #max_moves (state, action) pairs into memory
+2. stream #max_moves (state+mask, action) pairs into memory
 3. yield batches from memory
 4. go to (2) when no more new batches and not stopping condition
 
@@ -247,9 +245,9 @@ def vec837_to_board(vec837):
 
 
 # type: (np.ndarray) -> np.ndarray
-def vec837_to_mask4672(vec837):
+def board_to_mask4672(board):
 	mask = np.ones(4672, dtype=np.bool_)
-	for move in vec837_to_board(vec837).legal_moves:
+	for move in board.legal_moves:
 		mask[move_to_idx4672(move)] = False
 	return mask
 
@@ -263,6 +261,7 @@ def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1
 	actions = []
 	move_counter = 0
 	max_memory_percent = 100 * max_memory
+	debug = -1 if debug == 0 else debug ###! zero div handling
 	
 	# stream up to #max_games games from lichess PGN file
 	while max_moves < 0 or move_counter < max_moves:
@@ -281,21 +280,27 @@ def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1
 		# encode all states and moves from game (check max_moves)
 		for move in game.mainline_moves():
 			if max_moves < 0 or move_counter < max_moves:
-				states.append(board_to_vec837(board))
-				actions.append(move_to_idx4672(move))
+				
+				x = jnp.concatenate([board_to_vec837(board), board_to_mask4672(board)]) ###! pre-compute mask and pack into input
+				y = move_to_idx4672(move)
+				
+				states.append(x)
+				actions.append(y)
+				
 				board.push(move)
 				move_counter += 1
+				
 				if debug > 0 and move_counter % debug == 0:
 					print(f"{move_counter} {memory_percent}%")
 	
-	# construct numpy arrays
-	data_x = np.asarray(states, dtype=np.bool_)
-	data_y = np.asarray(actions, dtype=np.int32)
+	# construct jax.numpy arrays
+	data_x = jnp.asarray(states, dtype=jnp.bool_)
+	data_y = jnp.asarray(actions, dtype=jnp.int32)
 	
 	return data_x, data_y
 
 
-# type: (np.ndarray, np.ndarray, int, bool) ~> tuple[np.ndarray, np.ndarray]
+# type: (jax.Array, jax.Array, int, bool) ~> tuple[jax.Array, jax.Array]
 def batch_generator(data_x, data_y, batch_size, shuffle_key=None):
 	
 	# assertions
