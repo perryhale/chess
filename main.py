@@ -87,13 +87,13 @@ model = jax.vmap(lambda p, x: jnp.where(x[837:], -jnp.inf, dense_neural_network(
 loss = lambda p, xs, ys: jnp.mean(optax.softmax_cross_entropy_with_integer_labels(model(p, xs), ys))
 
 batch_size = 256
-train_block_count = 4
-train_block_size = 250_000
+train_block_count = 10
+train_block_size = 200_000
 val_block_size = 8192
 
 val_x, val_y = stream_pgn_to_supervised(lichess_pgn, max_moves=val_block_size, debug=val_block_size)
-val_steps = int(np.ceil(val_block_size / batch_size))
-train_steps = int(np.ceil(train_block_size / batch_size))
+val_steps = int(jnp.ceil(val_block_size / batch_size))
+train_steps = int(jnp.ceil(train_block_size / batch_size))
 
 for _ in range(train_block_count):
 	train_x, train_y = stream_pgn_to_supervised(lichess_pgn, max_moves=train_block_size, debug=train_block_size//5)

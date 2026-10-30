@@ -253,9 +253,8 @@ def board_to_mask4672(board):
 
 
 ### data loader
-###! impl scope: stream to batch from pgn / stream blocks to memory (+async)
 
-# type: (TextIO, int, float, int) -> tuple[np.ndarray, np.ndarray]
+# type: (TextIO, int, float, int) -> tuple[jax.Array, jax.Array]
 def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1):
 	states = []
 	actions = []
@@ -281,7 +280,7 @@ def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1
 		for move in game.mainline_moves():
 			if max_moves < 0 or move_counter < max_moves:
 				
-				x = jnp.concatenate([board_to_vec837(board), board_to_mask4672(board)]) ###! pre-compute mask and pack into input
+				x = jnp.concatenate([board_to_vec837(board), board_to_mask4672(board)]) # pre-compute mask and pack into input
 				y = move_to_idx4672(move)
 				
 				states.append(x)
