@@ -14,7 +14,7 @@ def count_games(pgn_path):
 				break
 			for move in game.mainline_moves():
 				count += 1
-			if count % 1000 == 0:
-				print(f"{count} [Elapsed time: {time.time()-T0:.2f}s]")
+				if count % 10_000 == 0:
+					print(f"{count} [Elapsed time: {time.time()-T0:.2f}s]")
 
 count_games("data/lichess_db_standard_rated_2017-03.pgn")

@@ -255,12 +255,11 @@ def board_to_mask4672(board):
 ### data loader
 
 # type: (TextIO, int, float, int) -> tuple[jax.Array, jax.Array]
-def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1):
+def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.85, debug=-1):
 	states = []
 	actions = []
 	move_counter = 0
 	max_memory_percent = 100 * max_memory
-	debug = -1 if debug == 0 else debug ###! zero div handling
 	
 	# stream up to #max_games games from lichess PGN file
 	while max_moves < 0 or move_counter < max_moves:
@@ -280,7 +279,8 @@ def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1
 		for move in game.mainline_moves():
 			if max_moves < 0 or move_counter < max_moves:
 				
-				x = jnp.concatenate([board_to_vec837(board), board_to_mask4672(board)]) # pre-compute mask and pack into input
+				###! pre-compute mask and pack into input
+				x = jnp.concatenate([board_to_vec837(board), board_to_mask4672(board)])
 				y = move_to_idx4672(move)
 				
 				states.append(x)
@@ -292,7 +292,7 @@ def stream_pgn_to_supervised(pgn_textio, max_moves=-1, max_memory=0.95, debug=-1
 				if debug > 0 and move_counter % debug == 0:
 					print(f"{move_counter} {memory_percent}%")
 	
-	# construct jax.numpy arrays
+	# construct jax arrays
 	data_x = jnp.asarray(states, dtype=jnp.bool_)
 	data_y = jnp.asarray(actions, dtype=jnp.int32)
 	
